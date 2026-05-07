@@ -43,8 +43,8 @@ class LLMJudgeDetector(BaseDetector):
         self.temperature = temperature
         self.timeout = timeout
         self.few_shot_examples = few_shot_examples or []
-        self.concurrency = max(1, min(concurrency, 16))
-        self.batch_size = max(1, min(batch_size, 20))
+        self.concurrency = max(1, min(concurrency, 8))
+        self.batch_size = max(1, min(batch_size, 10))
 
     def _format_conllu(self, tokens: list) -> str:
         lines = ["ID\tFORM\tUPOS\tHEAD\tDEPREL"]
