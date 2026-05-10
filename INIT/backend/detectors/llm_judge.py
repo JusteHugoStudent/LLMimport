@@ -10,23 +10,46 @@ from services.ollama_service import generate
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_PROMPT_TEMPLATE = """Dependency parse correctness check.
+DEFAULT_PROMPT_TEMPLATE = """You are a strict Universal Dependencies (UD) annotation auditor for French.
+
+Task: decide whether the annotation below is acceptable for the sentence.
+Judge ONLY the UD annotation, not whether the sentence is well written.
+The annotation may come from an official UD corpus, from Stanza, or from an injected-error variant of either.
+Do not assume the source is gold; judge only the CoNLL-U analysis shown here.
+Focus on UPOS, HEAD and DEPREL. HEAD=0 means root.
 
 Sentence: "{sentence_text}"
 
+CoNLL-U columns:
 {conllu_formatted}
 
-Is this dependency annotation correct? Check POS tags, HEAD and DEPREL.
-Reply ONLY with valid JSON, no markdown, no explanation:
-{{"is_correct": true, "confidence": 0.9, "suspect_tokens": [], "explanation": "brief"}}"""
+Return is_correct=false if one or more tokens has a likely wrong UPOS, HEAD or DEPREL.
+Return is_correct=true if the annotation is acceptable, even if another valid parse is possible.
+suspect_tokens must contain only integer token IDs.
+confidence is your confidence in the boolean verdict, from 0.0 to 1.0, using a dot decimal.
+explanation must be brief, in French, max 20 words.
 
-BATCH_PROMPT_TEMPLATE = """Evaluate each dependency parse below. For each, reply with a JSON object.
+Reply ONLY with valid JSON, no markdown, no extra text:
+{"is_correct": true, "confidence": 0.9, "suspect_tokens": [], "explanation": "annotation acceptable"}"""
+
+BATCH_PROMPT_TEMPLATE = """You are a strict Universal Dependencies (UD) annotation auditor for French.
+
+Evaluate each dependency parse independently.
+Judge ONLY the UD annotation, not whether the sentence is well written.
+The annotation may come from an official UD corpus, from Stanza, or from an injected-error variant of either.
+Do not assume the source is gold; judge only the CoNLL-U analysis shown here.
+Focus on UPOS, HEAD and DEPREL. HEAD=0 means root.
+Return is_correct=false if one or more tokens has a likely wrong UPOS, HEAD or DEPREL.
+Return is_correct=true if the annotation is acceptable, even if another valid parse is possible.
+suspect_tokens must contain only integer token IDs.
+confidence is your confidence in the boolean verdict, from 0.0 to 1.0, using a dot decimal.
+explanation must be brief, in French, max 20 words.
 
 {batch_entries}
 
 Reply with EXACTLY {batch_size} JSON objects, one per line, in order. No markdown, no extra text:
-{{"id": 1, "is_correct": true, "confidence": 0.9, "suspect_tokens": [], "explanation": "brief"}}
-{{"id": 2, "is_correct": false, "confidence": 0.8, "suspect_tokens": [3], "explanation": "wrong deprel"}}"""
+{"id": 1, "is_correct": true, "confidence": 0.9, "suspect_tokens": [], "explanation": "annotation acceptable"}
+{"id": 2, "is_correct": false, "confidence": 0.8, "suspect_tokens": [3], "explanation": "relation ou tête suspecte"}"""
 
 
 class LLMJudgeDetector(BaseDetector):
@@ -36,15 +59,27 @@ class LLMJudgeDetector(BaseDetector):
 
     def __init__(self, model: str = "llama3", prompt_template: str = None,
                  temperature: float = 0.1, timeout: float = 120.0,
-                 few_shot_examples: list = None, concurrency: int = 8,
-                 batch_size: int = 8, **kwargs):
-        self.model = model
+                 few_shot_examples: list = None, concurrency: int = 1,
+                 batch_size: int = 1, **kwargs):
+        self.model = str(model or "llama3").strip() or "llama3"
         self.prompt_template = prompt_template or DEFAULT_PROMPT_TEMPLATE
-        self.temperature = temperature
-        self.timeout = timeout
+        try:
+            self.temperature = max(0.0, min(float(temperature), 2.0))
+        except (TypeError, ValueError):
+            self.temperature = 0.1
+        try:
+            self.timeout = max(10.0, float(timeout))
+        except (TypeError, ValueError):
+            self.timeout = 120.0
         self.few_shot_examples = few_shot_examples or []
-        self.concurrency = max(1, min(concurrency, 16))
-        self.batch_size = max(1, min(batch_size, 20))
+        try:
+            self.concurrency = max(1, min(int(concurrency), 8))
+        except (TypeError, ValueError):
+            self.concurrency = 1
+        try:
+            self.batch_size = max(1, min(int(batch_size), 10))
+        except (TypeError, ValueError):
+            self.batch_size = 1
 
     def _format_conllu(self, tokens: list) -> str:
         lines = ["ID\tFORM\tUPOS\tHEAD\tDEPREL"]
@@ -129,6 +164,26 @@ class LLMJudgeDetector(BaseDetector):
         single = self._parse_response(raw)
         return [single] * expected_count
 
+    def _coerce_bool(self, value: Any, default: bool = True) -> bool:
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            lowered = value.strip().lower()
+            if lowered in {"true", "vrai", "yes", "oui", "correct"}:
+                return True
+            if lowered in {"false", "faux", "no", "non", "incorrect"}:
+                return False
+        return default
+
+    def _coerce_confidence(self, value: Any, default: float = 0.5) -> float:
+        try:
+            if isinstance(value, str):
+                value = value.strip().replace(",", ".")
+            confidence = float(value)
+        except (TypeError, ValueError):
+            confidence = default
+        return max(0.0, min(1.0, confidence))
+
     async def _detect_one(self, sent: dict, semaphore: asyncio.Semaphore) -> DetectionResult:
         async with semaphore:
             try:
@@ -149,10 +204,12 @@ class LLMJudgeDetector(BaseDetector):
                     )
 
                 parsed = self._parse_response(raw_response)
+                is_correct = self._coerce_bool(parsed.get("is_correct", True), True)
+                confidence = self._coerce_confidence(parsed.get("confidence", 0.5), 0.5)
                 return DetectionResult(
                     sentence_id=sent["id"],
-                    is_correct=parsed.get("is_correct", True),
-                    confidence=float(parsed.get("confidence", 0.5)),
+                    is_correct=is_correct,
+                    confidence=confidence,
                     details={
                         "suspect_tokens": parsed.get("suspect_tokens", []),
                         "explanation": parsed.get("explanation", ""),
@@ -216,8 +273,8 @@ class LLMJudgeDetector(BaseDetector):
 
                     results.append(DetectionResult(
                         sentence_id=sent["id"],
-                        is_correct=parsed.get("is_correct", True),
-                        confidence=float(parsed.get("confidence", 0.5)),
+                        is_correct=self._coerce_bool(parsed.get("is_correct", True), True),
+                        confidence=self._coerce_confidence(parsed.get("confidence", 0.5), 0.5),
                         details={
                             "suspect_tokens": parsed.get("suspect_tokens", []),
                             "explanation": parsed.get("explanation", ""),

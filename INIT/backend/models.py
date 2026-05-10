@@ -176,6 +176,7 @@ class ParseTextRequest(BaseModel):
 
 class ParseCorpusRequest(BaseModel):
     sentences: List[str]
+    name: Optional[str] = None
 
 
 # --- Ollama ---
@@ -189,6 +190,7 @@ class OllamaGenerateRequest(BaseModel):
 class OllamaStatus(BaseModel):
     available: bool
     models: List[str] = []
+    base_url: str = "http://localhost:11434"
 
 
 class OllamaModel(BaseModel):

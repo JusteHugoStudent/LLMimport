@@ -44,6 +44,10 @@ async def test_detector(req: DetectorTestRequest):
         det = LLMJudgeDetector(**req.params)
     elif req.detector_name == "ulisse":
         det = ULISSEDetector(**req.params)
+    elif req.detector_name == "svm":
+        det = SVMDetector(**req.params)
+    elif req.detector_name == "pupa":
+        det = PUPADetector(**req.params)
 
     try:
         results = await det.detect([req.sentence])

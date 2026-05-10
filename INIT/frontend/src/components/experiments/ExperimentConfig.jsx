@@ -3,23 +3,44 @@ import { Link } from 'react-router-dom'
 import { ArrowLeft, BrainCircuit, Check, Play, RotateCcw } from 'lucide-react'
 import api from '../../api/client'
 
-const DEFAULT_PROMPT = `Dependency parse correctness check.
+const DEFAULT_PROMPT = `You are a strict Universal Dependencies (UD) annotation auditor for French.
+
+Task: decide whether the annotation below is acceptable for the sentence.
+Judge ONLY the UD annotation, not whether the sentence is well written.
+The annotation may come from an official UD corpus, from Stanza, or from an injected-error variant of either.
+Do not assume the source is gold; judge only the CoNLL-U analysis shown here.
+Focus on UPOS, HEAD and DEPREL. HEAD=0 means root.
 
 Sentence: "{sentence_text}"
 
+CoNLL-U columns:
 {conllu_formatted}
 
-Is this dependency annotation correct? Check POS tags, HEAD and DEPREL.
-Reply ONLY with valid JSON, no markdown:
-{"is_correct": true, "confidence": 0.9, "suspect_tokens": [], "explanation": "brief"}`
+Return is_correct=false if one or more tokens has a likely wrong UPOS, HEAD or DEPREL.
+Return is_correct=true if the annotation is acceptable, even if another valid parse is possible.
+suspect_tokens must contain only integer token IDs.
+confidence is your confidence in the boolean verdict, from 0.0 to 1.0, using a dot decimal.
+explanation must be brief, in French, max 20 words.
+
+Reply ONLY with valid JSON, no markdown, no extra text:
+{"is_correct": true, "confidence": 0.9, "suspect_tokens": [], "explanation": "annotation acceptable"}`
 
 const presets = [
   { key: 'fast', label: 'Rapide', sub: 'LLM + ULISSE · 50 phrases', maxSentences: '50', detectors: ['llm_judge', 'ulisse'], errorRate: 10 },
   { key: 'llm', label: 'LLM seul', sub: 'Juge neuronal uniquement', maxSentences: '100', detectors: ['llm_judge'], errorRate: 10 },
-  { key: 'baseline', label: 'ULISSE baseline', sub: 'Référence classique', maxSentences: '', detectors: ['ulisse'], errorRate: 10 },
-  { key: 'compare', label: 'Comparaison complète', sub: 'LLM + ULISSE · 100 phrases', maxSentences: '100', detectors: ['llm_judge', 'ulisse'], errorRate: 15 },
-  { key: 'heavy', label: 'Modèle lourd', sub: 'LLM local gourmand', maxSentences: '50', detectors: ['llm_judge'], errorRate: 10 },
+  { key: 'baseline', label: 'Baselines classiques', sub: 'ULISSE + PUPA-inspiré + SVM', maxSentences: '', detectors: ['ulisse', 'pupa', 'svm'], errorRate: 10 },
+  { key: 'compare', label: 'Comparaison complète', sub: 'LLM + ULISSE + PUPA + SVM · corpus entier', maxSentences: '', detectors: ['llm_judge', 'ulisse', 'pupa', 'svm'], errorRate: 15 },
+  { key: 'heavy', label: 'Modèle lourd', sub: 'LLM local gourmand · 50 phrases', maxSentences: '50', detectors: ['llm_judge'], errorRate: 10 },
 ]
+
+function formatLocalExperimentTimestamp(date = new Date()) {
+  const pad = value => String(value).padStart(2, '0')
+  return [
+    date.getFullYear(),
+    pad(date.getMonth() + 1),
+    pad(date.getDate()),
+  ].join('-') + `-${pad(date.getHours())}:${pad(date.getMinutes())}`
+}
 
 export default function ExperimentConfig({ onSubmit }) {
   const [corpora, setCorpora] = useState([])
@@ -47,9 +68,20 @@ export default function ExperimentConfig({ onSubmit }) {
     batch_size: 1,
   })
   const [ulisseConfig, setUlisseConfig] = useState({
-    length_range: 0,
-    use_arc_lemma_feat: false,
+    length_range: 3,
+    use_arc_lemma_feat: true,
     threshold_percentile: 25,
+  })
+  const [pupaConfig, setPupaConfig] = useState({
+    threshold_percentile: 15,
+    threshold_source: 'target',
+    alpha: 0.1,
+  })
+  const [svmConfig, setSvmConfig] = useState({
+    max_train_sentences: 1000,
+    c_value: 0.5,
+    decision_threshold: 0.5,
+    auto_threshold: true,
   })
 
   useEffect(() => {
@@ -61,7 +93,7 @@ export default function ExperimentConfig({ onSubmit }) {
     api.get('/detectors').then(res => {
       setDetectorsList(res.data)
       const defaults = res.data
-        .filter(detector => detector.is_implemented && ['llm_judge', 'ulisse'].includes(detector.name))
+        .filter(detector => detector.is_implemented && ['llm_judge', 'ulisse', 'pupa', 'svm'].includes(detector.name))
         .map(detector => detector.name)
       setSelectedDetectors(current => current.length ? current : defaults)
     }).catch(() => setDetectorsList([]))
@@ -81,6 +113,8 @@ export default function ExperimentConfig({ onSubmit }) {
   )
   const llmSelected = selectedDetectors.includes('llm_judge')
   const ulisseSelected = selectedDetectors.includes('ulisse')
+  const pupaSelected = selectedDetectors.includes('pupa')
+  const svmSelected = selectedDetectors.includes('svm')
 
   const applyPreset = (nextPreset) => {
     const config = presets.find(item => item.key === nextPreset)
@@ -128,10 +162,12 @@ export default function ExperimentConfig({ onSubmit }) {
       const detectors_config = selectedDetectors.map(detectorName => {
         if (detectorName === 'llm_judge') return { name: detectorName, params: llmConfig }
         if (detectorName === 'ulisse') return { name: detectorName, params: ulisseConfig }
+        if (detectorName === 'pupa') return { name: detectorName, params: pupaConfig }
+        if (detectorName === 'svm') return { name: detectorName, params: svmConfig }
         return { name: detectorName, params: {} }
       })
       const res = await api.post('/experiments', {
-        name: name || `Homere-${new Date().toISOString().slice(0, 16).replace('T', '-')}`,
+        name: name || `Homere-${formatLocalExperimentTimestamp()}`,
         corpus_id: corpusId,
         max_sentences: maxSentences ? Number.parseInt(maxSentences, 10) : null,
         sample_random: sampleRandom,
@@ -328,8 +364,8 @@ export default function ExperimentConfig({ onSubmit }) {
             <div className="card card-pad">
               <div className="row gap-sm mb-md"><span className="numeral">vi.</span><h3 className="section-title" style={{ fontSize: 17 }}>ULISSE</h3></div>
               <div className="grid-2" style={{ gap: 14 }}>
-                <NumberField label="length_range" help="Fenêtre de longueurs comparables pour ULISSE. 0 compare avec des phrases de même longueur, 2 accepte +/-2 tokens." value={ulisseConfig.length_range} onChange={value => setUlisseConfig(config => ({ ...config, length_range: value }))} />
-                <NumberField label="threshold_percentile" help="Seuil de décision d'ULISSE. Plus il est bas, plus le détecteur est strict sur les analyses jugées suspectes." value={ulisseConfig.threshold_percentile} onChange={value => setUlisseConfig(config => ({ ...config, threshold_percentile: value }))} />
+                <NumberField label="length_range" help="Fenêtre de longueurs comparables pour ULISSE. 0 compare avec des phrases de même longueur, 3 accepte +/-3 tokens." value={ulisseConfig.length_range} onChange={value => setUlisseConfig(config => ({ ...config, length_range: value }))} />
+                <NumberField label="threshold_percentile" help="Seuil de décision d'ULISSE. Plus il est haut, plus le détecteur rejette de phrases comme suspectes." value={ulisseConfig.threshold_percentile} onChange={value => setUlisseConfig(config => ({ ...config, threshold_percentile: value }))} />
               </div>
               <button
                 type="button"
@@ -339,6 +375,41 @@ export default function ExperimentConfig({ onSubmit }) {
                 <Check size={13} />
                 <span className="mono">ArcLemmaFeat</span>
                 <HelpTip text="Ajoute des traits lexicaux fondés sur les lemmes dans le score ULISSE. Utile mais plus dépendant du corpus." />
+              </button>
+            </div>
+          )}
+
+          {pupaSelected && (
+            <div className="card card-pad">
+              <div className="row gap-sm mb-md"><span className="numeral">vii.</span><h3 className="section-title" style={{ fontSize: 17 }}>PUPA</h3></div>
+              <div className="grid-2" style={{ gap: 14 }}>
+                <NumberField label="threshold_percentile" help="Seuil de rejet fondé sur les scores de cohérence locale UPOS, têtes et DEPREL." value={pupaConfig.threshold_percentile} onChange={value => setPupaConfig(config => ({ ...config, threshold_percentile: value }))} />
+                <NumberField label="alpha" help="Lissage des motifs rares. Plus haut réduit la pénalité des motifs jamais vus." value={pupaConfig.alpha} step="0.1" onChange={value => setPupaConfig(config => ({ ...config, alpha: value }))} />
+              </div>
+              <label className="label mt-md">threshold_source</label>
+              <select className="select" value={pupaConfig.threshold_source} onChange={event => setPupaConfig(config => ({ ...config, threshold_source: event.target.value }))}>
+                <option value="target">target</option>
+                <option value="reference">reference</option>
+              </select>
+            </div>
+          )}
+
+          {svmSelected && (
+            <div className="card card-pad">
+              <div className="row gap-sm mb-md"><span className="numeral">viii.</span><h3 className="section-title" style={{ fontSize: 17 }}>SVM</h3></div>
+              <div className="grid-2" style={{ gap: 14 }}>
+                <NumberField label="max_train_sentences" help="Nombre de phrases propres tirées de la référence pour entraîner le SVM." value={svmConfig.max_train_sentences} onChange={value => setSvmConfig(config => ({ ...config, max_train_sentences: value }))} />
+                <NumberField label="C" help="Paramètre de régularisation du SVM linéaire." value={svmConfig.c_value} step="0.1" onChange={value => setSvmConfig(config => ({ ...config, c_value: value }))} />
+                <NumberField label="decision_threshold" help="Seuil manuel de probabilité d'erreur si le calibrage automatique est désactivé." value={svmConfig.decision_threshold} step="0.05" onChange={value => setSvmConfig(config => ({ ...config, decision_threshold: value }))} />
+              </div>
+              <button
+                type="button"
+                className={`choice-row mt-md${svmConfig.auto_threshold ? ' active' : ''}`}
+                onClick={() => setSvmConfig(config => ({ ...config, auto_threshold: !config.auto_threshold }))}
+              >
+                <Check size={13} />
+                <span>Seuil calibré sur l'entraînement</span>
+                <HelpTip text="Le SVM choisit le seuil qui maximise le F1 sur les exemples propres et injectés du corpus de référence." />
               </button>
             </div>
           )}
@@ -418,7 +489,7 @@ function detectorHelp(name) {
   return {
     llm_judge: "Le LLM reçoit la phrase et son CoNLL-U, puis répond si l'analyse lui semble correcte.",
     ulisse: "Méthode non supervisée qui repère les arbres atypiques à partir de statistiques linguistiques du corpus.",
-    svm: "Baseline supervisée prévue pour comparer avec une méthode d'apprentissage classique.",
-    pupa: "Méthode classique de fouille d'erreurs dans les analyses en dépendances.",
+    svm: "Baseline supervisée au niveau phrase, entraînée sur la référence propre et une copie avec erreurs injectées.",
+    pupa: "Adaptation inspirée de PUPA qui mesure la cohérence locale UPOS, têtes et DEPREL.",
   }[name] || 'Méthode de détection utilisée dans les comparaisons.'
 }

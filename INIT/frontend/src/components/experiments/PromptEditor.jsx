@@ -1,15 +1,27 @@
 import { useState } from 'react'
 import api from '../../api/client'
 
-const DEFAULT_PROMPT = `Dependency parse correctness check.
+const DEFAULT_PROMPT = `You are a strict Universal Dependencies (UD) annotation auditor for French.
+
+Task: decide whether the annotation below is acceptable for the sentence.
+Judge ONLY the UD annotation, not whether the sentence is well written.
+The annotation may come from an official UD corpus, from Stanza, or from an injected-error variant of either.
+Do not assume the source is gold; judge only the CoNLL-U analysis shown here.
+Focus on UPOS, HEAD and DEPREL. HEAD=0 means root.
 
 Sentence: "{sentence_text}"
 
+CoNLL-U columns:
 {conllu_formatted}
 
-Is this dependency annotation correct? Check POS tags, HEAD and DEPREL.
-Reply ONLY with valid JSON, no markdown, no explanation:
-{"is_correct": true, "confidence": 0.9, "suspect_tokens": [], "explanation": "brief"}`
+Return is_correct=false if one or more tokens has a likely wrong UPOS, HEAD or DEPREL.
+Return is_correct=true if the annotation is acceptable, even if another valid parse is possible.
+suspect_tokens must contain only integer token IDs.
+confidence is your confidence in the boolean verdict, from 0.0 to 1.0, using a dot decimal.
+explanation must be brief, in French, max 20 words.
+
+Reply ONLY with valid JSON, no markdown, no extra text:
+{"is_correct": true, "confidence": 0.9, "suspect_tokens": [], "explanation": "annotation acceptable"}`
 
 export default function PromptEditor({ value, onChange }) {
   const [testResult, setTestResult] = useState(null)

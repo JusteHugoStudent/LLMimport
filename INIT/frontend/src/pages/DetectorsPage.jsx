@@ -65,7 +65,9 @@ export default function DetectorsPage() {
 
       {selected?.name === 'llm_judge' && <LLMSettings models={models} ollama={ollama} />}
       {selected?.name === 'ulisse' && <UlisseSettings schema={selected.config_schema || {}} />}
-      {selected && !['llm_judge', 'ulisse'].includes(selected.name) && <DetectorPlaceholder detector={selected} />}
+      {selected?.name === 'pupa' && <PupaSettings />}
+      {selected?.name === 'svm' && <SvmSettings />}
+      {selected && !['llm_judge', 'ulisse', 'pupa', 'svm'].includes(selected.name) && <DetectorPlaceholder detector={selected} />}
     </div>
   )
 }
@@ -80,14 +82,27 @@ function labelDetector(name) {
 }
 
 function LLMSettings({ models, ollama }) {
-  const defaultPrompt = `Dependency parse correctness check.
+  const defaultPrompt = `You are a strict Universal Dependencies (UD) annotation auditor for French.
+
+Task: decide whether the annotation below is acceptable for the sentence.
+Judge ONLY the UD annotation, not whether the sentence is well written.
+The annotation may come from an official UD corpus, from Stanza, or from an injected-error variant of either.
+Do not assume the source is gold; judge only the CoNLL-U analysis shown here.
+Focus on UPOS, HEAD and DEPREL. HEAD=0 means root.
 
 Sentence: "{sentence_text}"
 
+CoNLL-U columns:
 {conllu_formatted}
 
-Reply ONLY with valid JSON:
-{"is_correct": true, "confidence": 0.9, "suspect_tokens": [], "explanation": "brief"}`
+Return is_correct=false if one or more tokens has a likely wrong UPOS, HEAD or DEPREL.
+Return is_correct=true if the annotation is acceptable, even if another valid parse is possible.
+suspect_tokens must contain only integer token IDs.
+confidence is your confidence in the boolean verdict, from 0.0 to 1.0, using a dot decimal.
+explanation must be brief, in French, max 20 words.
+
+Reply ONLY with valid JSON, no markdown, no extra text:
+{"is_correct": true, "confidence": 0.9, "suspect_tokens": [], "explanation": "annotation acceptable"}`
 
   return (
     <div className="grid-2" style={{ gridTemplateColumns: '1.1fr 1fr', alignItems: 'flex-start' }}>
@@ -97,7 +112,7 @@ Reply ONLY with valid JSON:
             <span className="numeral">i.</span>
             <h3 className="section-title" style={{ fontSize: 17 }}>Modèle Ollama</h3>
             <span style={{ flex: 1 }} />
-            <span className={`pill ${ollama.available ? 'pill-success' : 'pill-danger'}`}><span className={`dot ${ollama.available ? 'dot-done' : 'dot-failed'}`} /> localhost:11434</span>
+            <span className={`pill ${ollama.available ? 'pill-success' : 'pill-danger'}`}><span className={`dot ${ollama.available ? 'dot-done' : 'dot-failed'}`} /> {ollama.base_url || 'http://localhost:11434'}</span>
           </div>
           <div className="card" style={{ overflow: 'hidden' }}>
             {models.map((model, index) => (
@@ -164,11 +179,11 @@ function UlisseSettings() {
         <div className="card card-pad">
           <div className="row gap-sm mb-md"><span className="numeral">i.</span><h3 className="section-title" style={{ fontSize: 17 }}>Paramètres principaux</h3></div>
           <label className="label">length_range</label>
-          <input className="input mono" defaultValue="0" style={{ width: 120 }} />
+          <input className="input mono" defaultValue="3" style={{ width: 120 }} />
           <label className="label mt-md">threshold_percentile</label>
           <div className="row gap-md"><input type="range" min={1} max={99} defaultValue={25} style={{ flex: 1 }} /><span className="mono" style={{ fontSize: 14, fontWeight: 600, color: 'var(--terracotta)', width: 50, textAlign: 'right' }}>25</span></div>
           <div className="row gap-sm mt-md">
-            <input type="checkbox" id="arc" />
+            <input type="checkbox" id="arc" defaultChecked />
             <label htmlFor="arc" className="mono" style={{ fontSize: 12.5 }}>use_arc_lemma_feat</label>
           </div>
         </div>
@@ -187,6 +202,67 @@ function UlisseSettings() {
           <div key={feature} className="row gap-md" style={{ padding: '9px 0', borderBottom: '1px solid var(--line-3)' }}>
             <span className="mono" style={{ fontSize: 11.5, color: 'var(--aegean)', width: 170 }}>{feature}</span>
             <div className="bar-track" style={{ flex: 1 }}><div className="bar-fill" style={{ width: `${35 + index * 8}%` }} /></div>
+          </div>
+        ))}
+      </div>
+    </div>
+  )
+}
+
+function PupaSettings() {
+  return (
+    <div className="grid-2" style={{ gridTemplateColumns: '1fr 1fr', alignItems: 'flex-start' }}>
+      <div className="card card-pad">
+        <div className="row gap-sm mb-md"><span className="numeral">i.</span><h3 className="section-title" style={{ fontSize: 17 }}>Paramètres</h3></div>
+        <label className="label">threshold_percentile</label>
+        <div className="row gap-md"><input type="range" min={1} max={99} defaultValue={15} style={{ flex: 1 }} /><span className="mono" style={{ fontSize: 14, fontWeight: 600, color: 'var(--terracotta)', width: 50, textAlign: 'right' }}>15</span></div>
+        <label className="label mt-md">threshold_source</label>
+        <select className="select" defaultValue="target"><option>target</option><option>reference</option></select>
+        <label className="label mt-md">alpha</label>
+        <input className="input mono" defaultValue="0.1" style={{ width: 120 }} />
+      </div>
+
+      <div className="card card-pad">
+        <div className="row gap-sm mb-md"><span className="numeral">ii.</span><h3 className="section-title" style={{ fontSize: 17 }}>Adaptation UD</h3></div>
+        <p className="muted" style={{ fontSize: 12, lineHeight: 1.55, marginTop: 0 }}>
+          Baseline inspirée de PUPA, adaptée ici aux arbres de dépendances Universal Dependencies.
+        </p>
+        <div className="smallcaps mb-sm">Signaux utilisés</div>
+        {['UPOS', 'DEPREL', 'gouverneur UPOS + DEPREL', 'distance de dépendance', 'racines', 'cycles et têtes invalides'].map(item => (
+          <div key={item} className="row gap-md" style={{ padding: '10px 0', borderBottom: '1px solid var(--line-3)' }}>
+            <span className="mono" style={{ fontSize: 12, color: 'var(--aegean)', width: 180 }}>{item}</span>
+            <div className="muted" style={{ fontSize: 12 }}>cohérence locale</div>
+          </div>
+        ))}
+      </div>
+    </div>
+  )
+}
+
+function SvmSettings() {
+  return (
+    <div className="grid-2" style={{ gridTemplateColumns: '1fr 1fr', alignItems: 'flex-start' }}>
+      <div className="card card-pad">
+        <div className="row gap-sm mb-md"><span className="numeral">i.</span><h3 className="section-title" style={{ fontSize: 17 }}>Entraînement</h3></div>
+        <p className="muted" style={{ fontSize: 12, lineHeight: 1.55, marginTop: 0 }}>
+          Baseline supervisée au niveau phrase, entraînée sur une référence propre et une copie avec erreurs injectées.
+        </p>
+        <label className="label">max_train_sentences</label>
+        <input className="input mono" defaultValue="1000" style={{ width: 140 }} />
+        <label className="label mt-md">C</label>
+        <input className="input mono" defaultValue="0.5" style={{ width: 120 }} />
+        <div className="row gap-sm mt-md">
+          <input type="checkbox" id="svm-auto" defaultChecked />
+          <label htmlFor="svm-auto" className="mono" style={{ fontSize: 12.5 }}>auto_threshold</label>
+        </div>
+      </div>
+
+      <div className="card card-pad">
+        <div className="row gap-sm mb-md"><span className="numeral">ii.</span><h3 className="section-title" style={{ fontSize: 17 }}>Features</h3></div>
+        {['longueur', 'profondeur', 'distance moyenne', 'ratios UPOS', 'ratios DEPREL', 'score PUPA', 'anomalies structurelles'].map(item => (
+          <div key={item} className="row gap-md" style={{ padding: '10px 0', borderBottom: '1px solid var(--line-3)' }}>
+            <span className="mono" style={{ fontSize: 12, color: 'var(--aegean)', width: 170 }}>{item}</span>
+            <div className="bar-track" style={{ flex: 1 }}><div className="bar-fill" style={{ width: '58%' }} /></div>
           </div>
         ))}
       </div>

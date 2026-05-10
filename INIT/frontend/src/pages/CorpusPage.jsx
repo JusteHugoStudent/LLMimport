@@ -7,6 +7,16 @@ function formatDate(value) {
   return value ? String(value).slice(0, 10) : '-'
 }
 
+function splitRawSentences(text) {
+  let sentences = text.split(/\n+/).map(line => line.trim()).filter(Boolean)
+  if (sentences.length <= 1) {
+    sentences = (text.match(/[^.!?]+[.!?]+|[^.!?]+$/g) || [])
+      .map(sentence => sentence.trim())
+      .filter(Boolean)
+  }
+  return sentences
+}
+
 function CorpusList() {
   const navigate = useNavigate()
   const [corpora, setCorpora] = useState([])
@@ -14,6 +24,7 @@ function CorpusList() {
   const [showTextImport, setShowTextImport] = useState(false)
   const [uploading, setUploading] = useState(false)
   const [parsing, setParsing] = useState(false)
+  const [rawCorpusName, setRawCorpusName] = useState('')
   const [rawText, setRawText] = useState('')
   const [error, setError] = useState('')
 
@@ -39,12 +50,7 @@ function CorpusList() {
   }
 
   const createFromText = async () => {
-    let sentences = rawText.split(/\n+/).map(line => line.trim()).filter(Boolean)
-    if (sentences.length <= 1) {
-      sentences = (rawText.match(/[^.!?]+[.!?]+|[^.!?]+$/g) || [])
-        .map(sentence => sentence.trim())
-        .filter(Boolean)
-    }
+    const sentences = splitRawSentences(rawText)
     if (sentences.length === 0) {
       setError('Ajoute au moins une phrase.')
       return
@@ -53,8 +59,12 @@ function CorpusList() {
     setParsing(true)
     setError('')
     try {
-      const res = await api.post('/parse/corpus', { sentences })
+      const res = await api.post('/parse/corpus', {
+        sentences,
+        name: rawCorpusName.trim() || undefined,
+      })
       setShowTextImport(false)
+      setRawCorpusName('')
       setRawText('')
       await load()
       navigate(`/corpus/${res.data.corpus_id}`)
@@ -74,6 +84,7 @@ function CorpusList() {
   }
 
   const totalTokens = corpora.reduce((sum, c) => sum + (c.num_tokens || 0), 0)
+  const rawSentenceCount = splitRawSentences(rawText).length
 
   return (
     <div className="page">
@@ -178,7 +189,14 @@ function CorpusList() {
               <button className="btn btn-ghost btn-sm" onClick={() => setShowTextImport(false)} style={{ padding: 4 }}><X size={14} /></button>
             </div>
             <div style={{ padding: 22 }}>
-              <label className="label">Phrases</label>
+              <label className="label">Nom du corpus</label>
+              <input
+                className="input"
+                value={rawCorpusName}
+                onChange={(event) => setRawCorpusName(event.target.value)}
+                placeholder="stanza_300_phrases_test"
+              />
+              <label className="label mt-md">Phrases</label>
               <textarea
                 className="textarea"
                 rows={10}
@@ -187,7 +205,9 @@ function CorpusList() {
                 placeholder="Une phrase par ligne, ou un paragraphe court."
               />
               <div className="between mt-md">
-                <span className="muted" style={{ fontSize: 12 }}>Analyse locale via Stanza puis sauvegarde en CoNLL-U.</span>
+                <span className="muted" style={{ fontSize: 12 }}>
+                  Analyse locale via Stanza puis sauvegarde en CoNLL-U · {rawSentenceCount} phrase(s).
+                </span>
                 <button className="btn btn-accent" onClick={createFromText} disabled={parsing}>
                   <Sparkles size={14} /> {parsing ? 'Analyse...' : 'Créer le corpus'}
                 </button>

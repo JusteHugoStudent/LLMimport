@@ -117,7 +117,7 @@ export default function SettingsPage() {
                   <StatusRow
                     ok={status.available}
                     title="Ollama"
-                    detail={`localhost:11434 · ${models.length} modèle${models.length > 1 ? 's' : ''}`}
+                    detail={`${status.base_url || 'http://localhost:11434'} · ${models.length} modèle${models.length > 1 ? 's' : ''}`}
                     okLabel="actif"
                     failLabel="arrêté"
                   />

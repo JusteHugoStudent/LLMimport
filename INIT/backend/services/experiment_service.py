@@ -11,12 +11,18 @@ from typing import List, Dict, Any, Optional
 
 import aiosqlite
 
-from config import DB_PATH, RESULTS_DIR, ensure_runtime_dirs
+from config import DATA_DIR, DB_PATH, RESULTS_DIR, ensure_runtime_dirs
 from services.corpus_service import parse_corpus_sentences
 from services.error_injector import inject_errors
 
 logger = logging.getLogger(__name__)
 EXPERIMENT_PROGRESS: Dict[str, Dict[str, Any]] = {}
+GSD_SOURCE_DIR = DATA_DIR / "source_corpora" / "fr"
+GSD_REFERENCE_FILES = {
+    "train": GSD_SOURCE_DIR / "fr_gsd-ud-train.conllu",
+    "dev": GSD_SOURCE_DIR / "fr_gsd-ud-dev.conllu",
+}
+_GSD_REFERENCE_CACHE: Dict[str, tuple[List[Dict[str, Any]], Dict[str, Any]]] = {}
 
 
 def _get_detector(name: str, params: dict):
@@ -28,10 +34,10 @@ def _get_detector(name: str, params: dict):
         return ULISSEDetector(**params)
     elif name == "svm":
         from detectors.svm_detector import SVMDetector
-        return SVMDetector()
+        return SVMDetector(**params)
     elif name == "pupa":
         from detectors.pupa import PUPADetector
-        return PUPADetector()
+        return PUPADetector(**params)
     else:
         raise ValueError(f"Unknown detector: {name}")
 
@@ -105,6 +111,84 @@ def _slugify(value: str) -> str:
     value = value.strip().lower()
     value = re.sub(r"[^a-z0-9_-]+", "_", value)
     return re.sub(r"_+", "_", value).strip("_") or "experiment"
+
+
+def _looks_like_gsd_test(corpus_filepath: str, sentences: List[Dict[str, Any]]) -> bool:
+    """Detect the official UD French-GSD test split even after import/renaming."""
+    lower_path = str(corpus_filepath).lower()
+    if "fr_gsd-ud-test" in lower_path or "fr-gsd-ud-test" in lower_path:
+        return True
+
+    sample = sentences[: min(30, len(sentences))]
+    if not sample:
+        return False
+    test_ids = sum(
+        1
+        for sentence in sample
+        if str(sentence.get("id", "")).startswith("fr-ud-test_")
+    )
+    return test_ids >= max(1, len(sample) // 2)
+
+
+def _load_gsd_train_dev_reference() -> tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    missing = [str(path) for path in GSD_REFERENCE_FILES.values() if not path.exists()]
+    if missing:
+        raise FileNotFoundError(f"UD French-GSD train/dev reference files missing: {missing}")
+
+    cache_key = "ud_french_gsd_train_dev"
+    if cache_key in _GSD_REFERENCE_CACHE:
+        return _GSD_REFERENCE_CACHE[cache_key]
+
+    reference_sentences: List[Dict[str, Any]] = []
+    split_counts: Dict[str, int] = {}
+    for split, path in GSD_REFERENCE_FILES.items():
+        split_sentences = parse_corpus_sentences(str(path))
+        reference_sentences.extend(split_sentences)
+        split_counts[split] = len(split_sentences)
+
+    summary = {
+        "source": "ud_french_gsd_train_dev",
+        "sentence_count": len(reference_sentences),
+        "split_counts": split_counts,
+        "files": {split: str(path) for split, path in GSD_REFERENCE_FILES.items()},
+    }
+    _GSD_REFERENCE_CACHE[cache_key] = (reference_sentences, summary)
+    return reference_sentences, summary
+
+
+def _resolve_ulisse_reference(
+    corpus_filepath: str,
+    fallback_sentences: List[Dict[str, Any]],
+) -> tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    """
+    For the project protocol, classical detectors learn clean statistics from
+    UD French-GSD train+dev. The selected corpus, either GSD test or a Stanza
+    import, is then kept as the evaluation corpus and corrupted separately.
+    If the reference files are unavailable, fall back to the selected corpus.
+    """
+    fallback_summary = {
+        "source": "selected_corpus",
+        "sentence_count": len(fallback_sentences),
+        "reason": "gsd_train_dev_unavailable",
+    }
+
+    try:
+        reference_sentences, base_summary = _load_gsd_train_dev_reference()
+    except Exception as exc:
+        logger.warning("Failed to load GSD train/dev detector reference: %s", exc)
+        return fallback_sentences, {**fallback_summary, "error": str(exc)}
+
+    evaluation_split = (
+        "ud_french_gsd_test"
+        if _looks_like_gsd_test(corpus_filepath, fallback_sentences)
+        else "selected_corpus"
+    )
+    summary = {
+        **base_summary,
+        "evaluation_split": evaluation_split,
+        "reason": "project_clean_reference",
+    }
+    return reference_sentences, summary
 
 
 def _write_experiment_exports(experiment_id: str, experiment_name: str, results: Dict[str, Any]) -> Dict[str, str]:
@@ -358,6 +442,16 @@ async def run_experiment(experiment_id: str, corpus_filepath: str,
 
         # Step 1: Load corpus
         all_sentences = parse_corpus_sentences(corpus_filepath)
+        reference_detector_names = {"ulisse", "pupa", "svm"}
+        uses_reference_stats = any(detector.get("name") in reference_detector_names for detector in detectors_config)
+        if uses_reference_stats:
+            reference_sentences, reference_summary = _resolve_ulisse_reference(
+                corpus_filepath,
+                all_sentences,
+            )
+        else:
+            reference_sentences = all_sentences
+            reference_summary = {"source": "not_used", "sentence_count": 0}
         source_sentence_count = len(all_sentences)
         sample_size = max_sentences if max_sentences and max_sentences < source_sentence_count else source_sentence_count
         sampling_seed = sample_seed if sample_seed is not None else error_config.get("seed", 42)
@@ -401,6 +495,8 @@ async def run_experiment(experiment_id: str, corpus_filepath: str,
             "actual_error_rate": round(corrupted_count / len(ground_truth), 4) if ground_truth else 0,
             "errors_per_sentence": error_config.get("errors_per_sentence", 1),
             "error_type_counts": error_type_counts,
+            "ulisse_reference": reference_summary,
+            "detector_reference": reference_summary,
             "sampling": {
                 "mode": "random" if sample_random else "first_n",
                 "seed": sampling_seed,
@@ -467,6 +563,13 @@ async def run_experiment(experiment_id: str, corpus_filepath: str,
                 )
 
             try:
+                det_params = dict(det_params)
+                if det_name in reference_detector_names:
+                    det_params.setdefault("reference_sentences", reference_sentences)
+                if det_name == "svm":
+                    det_params.setdefault("training_error_types", error_config.get("error_types", ["head", "deprel", "pos"]))
+                    det_params.setdefault("training_seed", error_config.get("seed", 42) + 1000)
+                    det_params.setdefault("errors_per_sentence", error_config.get("errors_per_sentence", 1))
                 detector = _get_detector(det_name, det_params)
                 try:
                     results = await detector.detect(corrupted, progress_callback=detector_progress)

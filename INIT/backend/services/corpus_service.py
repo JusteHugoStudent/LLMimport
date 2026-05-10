@@ -2,6 +2,7 @@ import os
 import uuid
 import statistics
 from collections import Counter, defaultdict
+from pathlib import Path
 from typing import List, Dict, Any, Optional
 
 from conllu import parse as conllu_parse
@@ -9,8 +10,22 @@ from conllu import parse as conllu_parse
 from config import CORPORA_DIR
 
 
+def _resolve_filepath(filepath: str) -> Path:
+    path = Path(filepath)
+    if path.exists():
+        return path
+
+    # Imported corpora are sometimes stored with absolute paths from another
+    # machine. The database keeps the basename stable, so recover locally.
+    local_copy = CORPORA_DIR / path.name
+    if local_copy.exists():
+        return local_copy
+
+    raise FileNotFoundError(f"Corpus file not found: {filepath}")
+
+
 def _parse_file(filepath: str):
-    with open(filepath, "r", encoding="utf-8") as f:
+    with _resolve_filepath(filepath).open("r", encoding="utf-8") as f:
         data = f.read()
     return conllu_parse(data)
 

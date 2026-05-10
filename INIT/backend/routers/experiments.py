@@ -85,6 +85,26 @@ def _build_report_markdown(export: dict) -> str:
     rows = _get_metric_rows(results)
     best = max(rows, key=lambda row: row.get("f1", 0), default=None)
     agreement = results.get("agreement", {})
+    ulisse_reference = dataset.get("ulisse_reference") or {}
+    ulisse_reference_line = None
+    if ulisse_reference.get("source") == "ud_french_gsd_train_dev":
+        splits = ulisse_reference.get("split_counts", {})
+        evaluation = (
+            "UD French-GSD test"
+            if ulisse_reference.get("evaluation_split") == "ud_french_gsd_test"
+            else "le corpus sélectionné"
+        )
+        ulisse_reference_line = (
+            "- Référence ULISSE : UD French-GSD train+dev "
+            f"({ulisse_reference.get('sentence_count', 0)} phrases ; "
+            f"train={splits.get('train', 0)}, dev={splits.get('dev', 0)}), "
+            f"évaluation sur {evaluation}."
+        )
+    elif ulisse_reference.get("source") == "selected_corpus":
+        ulisse_reference_line = (
+            "- Référence ULISSE : corpus sélectionné avant injection "
+            f"({ulisse_reference.get('sentence_count', 0)} phrases)."
+        )
 
     lines = [
         f"# Rapport Homere — {experiment['name']}",
@@ -98,6 +118,7 @@ def _build_report_markdown(export: dict) -> str:
         f"- Phrases corrompues : {dataset.get('corrupted_sentences', 0)} ({_pct(dataset.get('actual_error_rate', 0))})",
         f"- Phrases originales : {dataset.get('clean_sentences', 0)}",
         f"- Erreurs injectées : {', '.join(f'{k}={v}' for k, v in dataset.get('error_type_counts', {}).items()) or 'aucune'}",
+        *( [ulisse_reference_line] if ulisse_reference_line else [] ),
         f"- Configuration d'injection : `{json.dumps(config.get('error_config', {}), ensure_ascii=False)}`",
         "",
         "Les détecteurs ne reçoivent pas la vérité terrain. Celle-ci sert uniquement après l'exécution pour calculer les métriques.",

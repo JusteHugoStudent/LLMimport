@@ -45,15 +45,10 @@ echo "  Création du virtualenv..."
 "$PYTHON" -m venv venv
 
 echo "  Activation du venv..."
-# Windows (Git Bash) uses Scripts/, Linux/macOS uses bin/
-if [ -f "venv/Scripts/activate" ]; then
-  source venv/Scripts/activate
-else
-  source venv/bin/activate
-fi
+source venv/bin/activate
 
 echo "  Mise à jour de pip..."
-python -m pip install --upgrade pip --quiet
+pip install --upgrade pip --quiet
 
 echo "  Installation des dépendances Python..."
 pip install -r requirements.txt --quiet
@@ -99,7 +94,7 @@ echo ""
 echo "Pour lancer le projet :"
 echo ""
 echo "  Terminal 1 (backend) :"
-echo "    cd backend && source venv/Scripts/activate && python main.py"
+echo "    cd backend && source venv/bin/activate && python main.py"
 echo ""
 echo "  Terminal 2 (frontend) :"
 echo "    cd frontend && npm run dev"

@@ -157,14 +157,22 @@ def _compute_subordination_features(tokens: List[dict]) -> dict:
 
 
 def _compute_avg_dependency_length(tokens: List[dict]) -> float:
-    non_punct = [tok for tok in tokens if tok.get("upos") != "PUNCT"]
+    non_punct = [
+        tok for tok in tokens
+        if tok.get("upos") != "PUNCT" and isinstance(tok.get("id"), int)
+    ]
     if not non_punct:
         return 0.0
+
+    # Dell'Orletta et al. measure dependency length as the number of words
+    # occurring between the syntactic head and the dependent, excluding
+    # punctuation marks. Adjacent non-punctuation tokens therefore have length 0.
+    non_punct_position = {tok["id"]: index for index, tok in enumerate(non_punct)}
     lengths = []
     for tok in non_punct:
         head = tok.get("head", 0)
-        if head > 0:
-            lengths.append(abs(tok["id"] - head))
+        if head > 0 and head in non_punct_position:
+            lengths.append(abs(non_punct_position[tok["id"]] - non_punct_position[head]) - 1)
     return sum(lengths) / len(lengths) if lengths else 0.0
 
 
@@ -266,10 +274,13 @@ class ULISSEScorer:
             self._global_feat_by_length["subordinate_ratio"][sent_len][sub_ratio_bin] += 1
             preverbal_bin = round(sub_feats["preverbal_ratio"], 1)
             self._global_feat_by_length["preverbal_sub_ratio"][sent_len][preverbal_bin] += 1
+            sub_depths = sub_feats["subordinate_chain_depths"]
+            avg_sub_depth = round(sum(sub_depths) / len(sub_depths), 1) if sub_depths else 0
+            self._global_feat_by_length["avg_subordinate_chain_depth"][sent_len][avg_sub_depth] += 1
             self._collect_distribution_feature(
                 "subordinate_chain_depth_distribution",
                 sent_len,
-                sub_feats["subordinate_chain_depths"],
+                sub_depths,
             )
 
             avg_dep_len = round(_compute_avg_dependency_length(tokens))
@@ -478,6 +489,10 @@ class ULISSEScorer:
         details["preverbal_sub_ratio"] = {"value": preverbal_bin, "weight": w_preverbal}
 
         sub_depths = sub_feats["subordinate_chain_depths"]
+        avg_sub_depth = round(sum(sub_depths) / len(sub_depths), 1) if sub_depths else 0
+        w_avg_sub_depth = self._global_feature_weight("avg_subordinate_chain_depth", avg_sub_depth, sent_len)
+        details["avg_subordinate_chain_depth"] = {"value": avg_sub_depth, "weight": w_avg_sub_depth}
+
         w_sub_depth_dist, sub_depth_weights = self._distribution_feature_weight(
             "subordinate_chain_depth_distribution",
             sub_depths,
@@ -510,7 +525,8 @@ class ULISSEScorer:
 
         global_weights = [
             w_tree_depth, w_avg_comp, w_comp_dist, w_vr,
-            w_arity_dist, w_sub_ratio, w_preverbal, w_sub_depth_dist, w_dep_len,
+            w_arity_dist, w_sub_ratio, w_preverbal, w_avg_sub_depth,
+            w_sub_depth_dist, w_dep_len,
         ]
         qs = w_arc_pos
         for w in global_weights:
@@ -545,29 +561,33 @@ class ULISSEDetector(BaseDetector):
     )
     is_implemented = True
 
-    def __init__(self, length_range: int = 0, use_arc_lemma_feat: bool = False,
-                 threshold_percentile: float = 25.0):
+    def __init__(self, length_range: int = 3, use_arc_lemma_feat: bool = True,
+                 threshold_percentile: float = 25.0,
+                 reference_sentences: Optional[List[Dict[str, Any]]] = None,
+                 threshold_source: str = "target"):
         self.length_range = length_range
         self.use_arc_lemma_feat = use_arc_lemma_feat
         self.threshold_percentile = threshold_percentile
+        self.reference_sentences = reference_sentences or []
+        self.threshold_source = threshold_source
         self.scorer: Optional[ULISSEScorer] = None
 
     def get_config_schema(self) -> dict:
         return {
             "length_range": {
                 "type": "integer",
-                "default": 0,
+                "default": 3,
                 "min": 0,
                 "max": 10,
                 "description": (
                     "Range parameter r for length-based feature comparison. "
                     "0 = compare only with sentences of exact same length (in-domain). "
-                    "2 = compare with sentences of similar length +/-2 (out-of-domain, recommended)."
+                    "3 = compare with sentences of similar length +/-3, robust for GSD train+dev -> test."
                 ),
             },
             "use_arc_lemma_feat": {
                 "type": "boolean",
-                "default": False,
+                "default": True,
                 "description": (
                     "Also use lemma-based arc plausibility (ArcLemmaFeat, from the 2013 paper). "
                     "Captures lexical patterns in addition to POS-based patterns."
@@ -590,12 +610,17 @@ class ULISSEDetector(BaseDetector):
         if not sentences:
             return []
 
-        # Phase 1: collect statistics from the full corpus
+        # Phase 1: collect statistics from a stable reference corpus when
+        # available. In the project pipeline this is the clean UD corpus before
+        # artificial error injection, which makes ULISSE less dependent on the
+        # small corrupted evaluation sample.
+        stats_sentences = self.reference_sentences or sentences
+        stats_source = "reference" if self.reference_sentences else "target"
         self.scorer = ULISSEScorer(
             length_range=self.length_range,
             use_arc_lemma_feat=self.use_arc_lemma_feat,
         )
-        self.scorer.collect_statistics(sentences)
+        self.scorer.collect_statistics(stats_sentences)
 
         # Phase 2: score each sentence
         scored = []
@@ -610,8 +635,12 @@ class ULISSEDetector(BaseDetector):
                     "current_sentence_text": sent.get("text", ""),
                 })
 
-        # Determine threshold from percentile
+        # Determine threshold from percentile. The target distribution keeps
+        # ULISSE usable as a ranking detector without labels. A reference
+        # threshold can still be requested for calibration experiments.
         all_scores = sorted([s[1] for s in scored])
+        if self.threshold_source == "reference" and stats_sentences:
+            all_scores = sorted(self.scorer.score_sentence(sent)[0] for sent in stats_sentences)
         if len(all_scores) == 0:
             threshold = 0.0
         else:
@@ -641,6 +670,10 @@ class ULISSEDetector(BaseDetector):
                 details={
                     "quality_score": qs,
                     "threshold": threshold,
+                    "threshold_percentile": self.threshold_percentile,
+                    "threshold_source": self.threshold_source,
+                    "stats_source": stats_source,
+                    "stats_sentence_count": len(stats_sentences),
                     "num_tokens": len(sent.get("tokens", [])),
                     "feature_weights": {
                         k: v for k, v in details.items() if k != "quality_score"

@@ -1,9 +1,10 @@
 import httpx
 import logging
+import os
 
 logger = logging.getLogger(__name__)
 
-OLLAMA_BASE_URL = "http://localhost:11434"
+OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434").rstrip("/")
 
 
 async def check_status() -> dict:
@@ -13,10 +14,10 @@ async def check_status() -> dict:
             if resp.status_code == 200:
                 data = resp.json()
                 models = [m["name"] for m in data.get("models", [])]
-                return {"available": True, "models": models}
+                return {"available": True, "models": models, "base_url": OLLAMA_BASE_URL}
     except Exception as e:
         logger.warning(f"Ollama not available: {e}")
-    return {"available": False, "models": []}
+    return {"available": False, "models": [], "base_url": OLLAMA_BASE_URL}
 
 
 async def list_models() -> list:
